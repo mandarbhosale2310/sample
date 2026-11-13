@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Block Runner</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0f1a2b; overflow: hidden; font-family: system-ui, sans-serif; }
+  canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const W = 960, H = 540;            // logical resolution
+  let scale = 1, offX = 0, offY = 0;
+
+  function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = innerWidth * dpr;
+    canvas.height = innerHeight * dpr;
+    scale = Math.min(innerWidth / W, innerHeight / H) * dpr;
+    offX = (canvas.width - W * scale) / 2;
+    offY = (canvas.height - H * scale) / 2;
+  }
+  addEventListener('resize', resize);
+  resize();
+
+  // ---- Tunables ----
+  const GRAVITY = 2200, JUMP_V = -820, MAX_JUMPS = 2;
+  const LEVELS = [430, 350, 270, 190];   // platform top y for each "level"
+  const PLAYER = { w: 30, h: 40 };
+
+  let state, best = +(localStorageGet('blockRunnerBest') || 0);
+
+  function localStorageGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
+  function localStorageSet(k, v) { try { localStorage.setItem(k, v); } catch {} }
+
+  function reset() {
+    state = {
+      mode: 'ready',
+      speed: 300, distance: 0, coins: 0, time: 0,
+      player: { x: 160, y: LEVELS[0] - PLAYER.h, vy: 0, jumps: 0, grounded: true, anim: 0 },
+      platforms: [], coinList: [], particles: [],
+      lastLevel: 0,
+    };
+    // starting runway
+    state.platforms.push({ x: -50, y: LEVELS[0], w: 700, h: H - LEVELS[0], hue: 200 });
+    while (rightEdge() < W + 400) spawnPlatform();
+  }
+
+  function rightEdge() {
+    const p = state.platforms[state.platforms.length - 1];
+    return p.x + p.w;
+  }
+
+  function spawnPlatform() {
+    const s = state;
+    const diff = Math.min(1, s.distance / 20000);
+    // move at most one level up, any number down
+    let lvl = s.lastLevel;
+    const r = Math.random();
+    if (r < 0.35 && lvl < LEVELS.length - 1) lvl++;
+    else if (r < 0.65 && lvl > 0) lvl -= 1 + Math.floor(Math.random() * lvl);
+    const gap = 70 + Math.random() * (90 + 90 * diff);
+    const w = 140 + Math.random() * (260 - 120 * diff);
+    const x = rightEdge() + gap;
+    const y = LEVELS[lvl];
+    s.platforms.push({ x, y, w, h: 26, hue: 160 + lvl * 40 + Math.random() * 20 });
+
+    // coins: an arc over the gap (catch them mid-jump) + sometimes a row high above the block
+    const prevTop = LEVELS[s.lastLevel];
+    const gx0 = x - gap, n = 3 + Math.floor(gap / 60);
+    for (let i = 0; i < n; i++) {
+      const t = (i + 0.5) / n;
+      const baseY = prevTop + (y - prevTop) * t;
+      s.coinList.push({ x: gx0 + gap * t, y: baseY - 90 - Math.sin(t * Math.PI) * 70, taken: false, phase: Math.random() * 6 });
+    }
+    if (Math.random() < 0.5) {
+      const cnt = 2 + Math.floor(Math.random() * 3);
+      for (let i = 0; i < cnt; i++)
+        s.coinList.push({ x: x + 30 + i * 40, y: y - 150 - Math.random() * 20, taken: false, phase: Math.random() * 6 });
+    }
+    s.lastLevel = lvl;
+  }
+
+  function jump() {
+    if (state.mode === 'ready') { state.mode = 'play'; }
+    if (state.mode === 'over') { reset(); state.mode = 'play'; return; }
+    const p = state.player;
+    if (p.jumps < MAX_JUMPS) {
+      p.vy = JUMP_V * (p.jumps === 0 ? 1 : 0.85);
+      p.jumps++;
+      p.grounded = false;
+      burst(p.x + PLAYER.w / 2, p.y + PLAYER.h, '#cfe8ff', 6);
+    }
+  }
+
+  function burst(x, y, color, n) {
+    for (let i = 0; i < n; i++)
+      state.particles.push({ x, y, vx: (Math.random() - 0.5) * 300, vy: -Math.random() * 300, life: 0.5, color });
+  }
+
+  addEventListener('keydown', e => {
+    if (['Space', 'ArrowUp', 'KeyW'].includes(e.code)) { e.preventDefault(); if (!e.repeat) jump(); }
+    if (e.code === 'KeyP' && state.mode !== 'over') state.mode = state.mode === 'pause' ? 'play' : 'pause';
+  });
+  canvas.addEventListener('pointerdown', e => { e.preventDefault(); jump(); });
+
+  function update(dt) {
+    const s = state;
+    s.time += dt;
+    for (const c of s.coinList) c.phase += dt * 6;
+    if (s.mode !== 'play') return;
+
+    s.speed = Math.min(650, 300 + s.distance / 60);
+    const dx = s.speed * dt;
+    s.distance += dx;
+
+    for (const pl of s.platforms) pl.x -= dx;
+    for (const c of s.coinList) c.x -= dx;
+    s.platforms = s.platforms.filter(pl => pl.x + pl.w > -50);
+    s.coinList = s.coinList.filter(c => c.x > -50 && !c.taken);
+    while (rightEdge() < W + 400) spawnPlatform();
+
+    const p = s.player;
+    const prevBottom = p.y + PLAYER.h;
+    p.vy += GRAVITY * dt;
+    p.y += p.vy * dt;
+    p.grounded = false;
+    p.anim += dt * s.speed / 30;
+
+    for (const pl of s.platforms) {
+      const overlapX = p.x + PLAYER.w > pl.x + 2 && p.x < pl.x + pl.w - 2;
+      if (!overlapX) continue;
+      const bottom = p.y + PLAYER.h;
+      if (p.vy >= 0 && prevBottom <= pl.y + 1 && bottom >= pl.y) {
+        p.y = pl.y - PLAYER.h; p.vy = 0; p.jumps = 0; p.grounded = true;
+      } else if (bottom > pl.y + 6 && p.y < pl.y + pl.h && p.x + PLAYER.w <= pl.x + dx + 4) {
+        // ran into the side of a taller block
+        die();
+        return;
+      }
+    }
+
+    for (const c of s.coinList) {
+      if (Math.abs(c.x - (p.x + PLAYER.w / 2)) < 26 && Math.abs(c.y - (p.y + PLAYER.h / 2)) < 30) {
+        c.taken = true; s.coins++;
+        burst(c.x, c.y, '#ffd34d', 10);
+      }
+    }
+
+    for (const q of s.particles) { q.x += q.vx * dt; q.y += q.vy * dt; q.vy += 900 * dt; q.life -= dt; }
+    s.particles = s.particles.filter(q => q.life > 0);
+
+    if (p.y > H + 50) die();
+  }
+
+  function score() { return Math.floor(state.distance / 10) + state.coins * 50; }
+
+  function die() {
+    state.mode = 'over';
+    const sc = score();
+    if (sc > best) { best = sc; localStorageSet('blockRunnerBest', best); }
+  }
+
+  // ---- Rendering ----
+  function draw() {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#0f1a2b';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.setTransform(scale, 0, 0, scale, offX, offY);
+    ctx.save();
+    ctx.beginPath(); ctx.rect(0, 0, W, H); ctx.clip();
+
+    const s = state;
+    // sky
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#2b3a7a'); g.addColorStop(1, '#f39c6b');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+    // parallax hills
+    drawHills(s.distance * 0.2, 380, 70, '#3b3f78');
+    drawHills(s.distance * 0.45, 440, 50, '#2c2f5e');
+
+    // level guide lines (faint)
+    ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+    for (const y of LEVELS) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+
+    // platforms
+    for (const pl of s.platforms) {
+      const h = Math.max(pl.h, H - pl.y);
+      ctx.fillStyle = `hsl(${pl.hue},45%,32%)`;
+      ctx.fillRect(pl.x, pl.y, pl.w, pl.h === 26 ? pl.h : h);
+      ctx.fillStyle = `hsl(${pl.hue},65%,55%)`;
+      ctx.fillRect(pl.x, pl.y, pl.w, 8);
+      ctx.fillStyle = 'rgba(0,0,0,0.18)';
+      for (let bx = pl.x + 30; bx < pl.x + pl.w; bx += 30) ctx.fillRect(bx, pl.y + 8, 2, (pl.h === 26 ? pl.h : h) - 8);
+    }
+
+    // coins
+    for (const c of s.coinList) {
+      const sx = Math.abs(Math.cos(c.phase * 0.5));
+      ctx.fillStyle = '#ffd34d';
+      ctx.beginPath(); ctx.ellipse(c.x, c.y + Math.sin(c.phase) * 3, 10 * sx + 2, 11, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#e0a400';
+      ctx.beginPath(); ctx.ellipse(c.x, c.y + Math.sin(c.phase) * 3, 5 * sx + 1, 6, 0, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // particles
+    for (const q of s.particles) {
+      ctx.globalAlpha = Math.max(0, q.life * 2);
+      ctx.fillStyle = q.color; ctx.fillRect(q.x - 2, q.y - 2, 4, 4);
+    }
+    ctx.globalAlpha = 1;
+
+    drawPlayer(s.player);
+
+    // HUD
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 22px system-ui, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText(`Score ${score()}`, 20, 36);
+    ctx.fillStyle = '#ffd34d';
+    ctx.fillText(`● ${s.coins}`, 20, 64);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = 'rgba(255,255,255,0.8)';
+    ctx.fillText(`Best ${best}`, W - 20, 36);
+
+    if (s.mode !== 'play') {
+      ctx.fillStyle = 'rgba(10,15,30,0.55)'; ctx.fillRect(0, 0, W, H);
+      ctx.textAlign = 'center'; ctx.fillStyle = '#fff';
+      ctx.font = 'bold 52px system-ui, sans-serif';
+      const title = s.mode === 'ready' ? 'BLOCK RUNNER' : s.mode === 'pause' ? 'PAUSED' : 'GAME OVER';
+      ctx.fillText(title, W / 2, H / 2 - 30);
+      ctx.font = '22px system-ui, sans-serif';
+      const sub = s.mode === 'over'
+        ? `Score ${score()}  ·  Coins ${s.coins}  —  Space / tap to retry`
+        : s.mode === 'pause' ? 'Press P to resume'
+        : 'Space / ↑ / tap to jump  ·  press twice to double-jump  ·  P to pause';
+      ctx.fillText(sub, W / 2, H / 2 + 20);
+    }
+    ctx.restore();
+  }
+
+  function drawHills(off, base, amp, color) {
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.moveTo(0, H);
+    for (let x = 0; x <= W; x += 20) ctx.lineTo(x, base - Math.abs(Math.sin((x + off) / 160)) * amp);
+    ctx.lineTo(W, H); ctx.fill();
+  }
+
+  function drawPlayer(p) {
+    const x = p.x, y = p.y;
+    // body
+    ctx.fillStyle = '#ff5d73';
+    ctx.fillRect(x, y + 8, PLAYER.w, PLAYER.h - 18);
+    // head
+    ctx.fillStyle = '#ffd9b3';
+    ctx.fillRect(x + 4, y - 6, PLAYER.w - 8, 18);
+    ctx.fillStyle = '#222';
+    ctx.fillRect(x + PLAYER.w - 11, y, 4, 4);
+    // cap
+    ctx.fillStyle = '#3a7bd5';
+    ctx.fillRect(x + 2, y - 10, PLAYER.w - 4, 6);
+    ctx.fillRect(x + PLAYER.w - 4, y - 6, 8, 3);
+    // legs
+    ctx.fillStyle = '#2d2d5a';
+    const swing = p.grounded ? Math.sin(p.anim) * 6 : 4;
+    ctx.fillRect(x + 4 + swing, y + PLAYER.h - 10, 8, 10);
+    ctx.fillRect(x + PLAYER.w - 12 - swing, y + PLAYER.h - 10, 8, 10);
+  }
+
+  // ---- Loop ----
+  reset();
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.033, (now - last) / 1000);
+    last = now;
+    update(dt);
+    draw();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
